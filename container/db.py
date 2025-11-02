@@ -11,11 +11,7 @@ from typing import Optional, Dict, Any, List
 import asyncpg
 
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-)
+# Логгер модуля (настройка в main.py)
 logger = logging.getLogger(__name__)
 
 
