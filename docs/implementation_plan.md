@@ -102,7 +102,7 @@ aiogram
 - Инициализация бота: Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
 - Функция send_notification(chat_id, listing, category):
   - Получение emoji из CATEGORY_EMOJI[category]
-  - Форматирование сообщения: "{emoji} {title}\n💰 {price} {currency}\n📍 {location}\n🔗 https://www.avito.ru/{item_id}"
+  - Форматирование сообщения: "{title}\n💰 {price} {currency}\n {location}\n🔗 https://www.avito.ru/{item_id}"
   - await bot.send_message(chat_id, text)
   - Обработка исключений с re-raise для retry логики
 
