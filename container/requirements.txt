@@ -1,0 +1,4 @@
+git+https://github.com/Stepan2222000/avito-library.git@main#egg=avito-library
+playwright
+asyncpg
+aiogram

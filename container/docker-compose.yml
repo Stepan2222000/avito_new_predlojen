@@ -1,0 +1,33 @@
+services:
+  avito_parser:
+    # Сборка образа из текущей директории (container/)
+    build: .
+
+    # Имя контейнера для удобства
+    container_name: avito_parser
+
+    # Монтируем директорию с данными (groups.json, proxies.txt, sellers_blocklist.txt)
+    volumes:
+      - ../scripts/data:/app/data
+
+    # Переменные окружения для конфигурации
+    environment:
+      # PostgreSQL подключение (внешняя БД)
+      POSTGRES_HOST: 81.30.105.134
+      POSTGRES_PORT: 5415
+      POSTGRES_DB: avito_new_predlojen
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: Password123
+
+      # Настройки воркеров и лимиты
+      WORKER_COUNT: 15
+      MAX_TASK_ATTEMPTS: 5
+      TASK_LOCK_TIMEOUT_MINUTES: 10
+      PROXY_LOCK_TIMEOUT_MINUTES: 30
+      CAPTCHA_MAX_ATTEMPTS: 10
+
+      # Telegram бот токен (заменить на реальный)
+      TELEGRAM_BOT_TOKEN: 8508454518:AAGc76GHWyNNgLbTHyVZFNGiDo26EPr9MsQ
+
+    # Автоматический перезапуск при сбоях
+    restart: unless-stopped
