@@ -2,7 +2,7 @@
   "groups": [
     {
       "name": "auto_msk",
-      "enabled": true,
+      "enabled": false,
       "category": "avtomobili",
       "region_slug": "moskva",
       "brands": ["audi", "bmw"],
@@ -10,7 +10,19 @@
       "all_russia": false,
       "enrich_q": false,
       "blocklist_mode": "global",
-      "telegram_chat_id": 123456789
+      "telegram_chat_id": 779088495
+    },
+    {
+      "name": "boats_russia",
+      "enabled": true,
+      "category": "katera_i_yahty",
+      "region_slug": "all",
+      "brands": ["bayliner", "sea ray", "chaparral", "regal", "monterey", "four winns", "crownline", "yamaha", "beneteau", "maxum"],
+      "models": {},
+      "all_russia": true,
+      "enrich_q": false,
+      "blocklist_mode": "global",
+      "telegram_chat_id": 779088495
     }
   ]
 }

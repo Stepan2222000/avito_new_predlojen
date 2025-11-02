@@ -33,7 +33,7 @@ CAPTCHA_MAX_ATTEMPTS = int(os.getenv("CAPTCHA_MAX_ATTEMPTS", "10"))
 MAX_TASK_ATTEMPTS = int(os.getenv("MAX_TASK_ATTEMPTS", "5"))
 
 # Поля для парсинга каталога (фиксированные)
-CATALOG_FIELDS = ["item_id", "title", "price", "seller_name", "location", "published"]
+CATALOG_FIELDS = ["item_id", "title", "price", "seller_name", "published"]
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +47,18 @@ class WorkerBrowser:
         self.playwright: Optional[Playwright] = None
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
-        self.current_proxy: Optional[Dict] = None
+        self.current_proxy: Optional[str] = None
 
-    async def start(self, proxy: Dict):
+    async def start(self, proxy: str):
         """Запуск браузера с прокси"""
         # Закрыть предыдущий браузер если был открыт
         await self.close()
 
-        # Установить DISPLAY для текущего воркера
-        os.environ["DISPLAY"] = self.display
+        # Установить DISPLAY для текущего воркера (только для Linux с Xvfb)
+        # os.environ["DISPLAY"] = self.display  # Отключено для Mac
 
         # Парсинг прокси (формат: IP:PORT:USER:PASS)
-        proxy_parts = proxy["proxy_url"].split(":")
+        proxy_parts = proxy.split(":")
         server = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
         username = proxy_parts[2]
         password = proxy_parts[3]
@@ -158,7 +158,7 @@ async def handle_page_state(
     # Прокси блокировка 403/407 (постоянный бан)
     elif state in [PROXY_BLOCK_403_DETECTOR_ID, PROXY_AUTH_DETECTOR_ID]:
         logger.warning(f"[Worker-{worker_id}] Proxy blocked 403/407, banning proxy...")
-        await db.ban_proxy(pool, worker_browser.current_proxy["proxy_url"])
+        await db.ban_proxy(pool, worker_browser.current_proxy)
         await db.release_proxy(pool, worker_id)
         # Перезапуск браузера после бана прокси
         await worker_browser.close()
@@ -267,7 +267,7 @@ async def process_task(
         elif meta.status == CatalogParseStatus.PROXY_BLOCKED:
             # 403/407 - бан прокси и перезапуск браузера
             logger.warning(f"[Worker-{worker_id}] Proxy blocked from parse_catalog")
-            await db.ban_proxy(pool, worker_browser.current_proxy["proxy_url"])
+            await db.ban_proxy(pool, worker_browser.current_proxy)
             await db.release_proxy(pool, worker_id)
             # Перезапуск браузера после бана прокси
             await worker_browser.close()
@@ -289,12 +289,13 @@ async def process_task(
             await db.complete_task(pool, task["id"])
             return True
 
-        # Фильтр: только объявления с "сегодня" или пустым published
+        # Фильтр: только свежие объявления (сегодня, минуты/часы назад)
+        fresh_keywords = ["сегодня", "минут", "минуту", "час", "часа", "часов"]
         today_listings = [
             listing
             for listing in listings
-            if not listing.get("published")
-            or "сегодня" in listing.get("published", "").lower()
+            if not listing.published_ago
+            or any(keyword in (listing.published_ago or "").lower() for keyword in fresh_keywords)
         ]
 
         logger.info(
@@ -305,9 +306,21 @@ async def process_task(
             await db.complete_task(pool, task["id"])
             return True
 
+        # Преобразование CatalogListing объектов в словари для БД фильтрации
+        today_listings_dicts = [
+            {
+                "item_id": listing.item_id,
+                "title": listing.title,
+                "price": listing.price,
+                "seller_name": listing.seller_name,
+                "published": listing.published_ago,
+            }
+            for listing in today_listings
+        ]
+
         # Фильтр через БД (блоклисты продавцов и объявлений)
         filtered_listings = await db.filter_listings_batch(
-            pool, today_listings, task["blocklist_mode"], task["group_name"]
+            pool, today_listings_dicts, task["blocklist_mode"], task["group_name"]
         )
 
         logger.info(
@@ -322,18 +335,19 @@ async def process_task(
         for listing in filtered_listings:
             try:
                 # Парсинг currency из price строки
-                price_str = listing.get("price", "")
+                price_value = listing.get("price")
+                price_str = str(price_value) if price_value is not None else ""
                 currency = "₽"  # По умолчанию рубли
                 if "€" in price_str:
                     currency = "€"
                 elif "$" in price_str:
                     currency = "$"
 
-                # Добавляем currency для Telegram
-                listing["currency"] = currency
+                # Создаём обогащённый словарь для Telegram
+                enriched_listing = {**listing, "currency": currency}
 
                 # Отправка уведомления в Telegram
-                await send_notification(task["telegram_chat_id"], listing)
+                await send_notification(task["telegram_chat_id"], enriched_listing)
                 logger.info(
                     f"[Worker-{worker_id}] Sent notification for {listing['item_id']}"
                 )
@@ -345,16 +359,16 @@ async def process_task(
                 )
 
                 # Сохранение в историю parsed_items
+                price_value = listing.get("price")
                 await db.save_item(
                     pool,
                     {
                         "item_id": listing["item_id"],
                         "group_name": task["group_name"],
                         "title": listing.get("title"),
-                        "price": listing.get("price"),
+                        "price": str(price_value) if price_value is not None else None,
                         "currency": currency,
                         "seller_name": listing.get("seller_name"),
-                        "location": listing.get("location"),
                         "published": listing.get("published"),
                         "url": f"https://www.avito.ru/{listing['item_id']}",
                     },
@@ -376,8 +390,14 @@ async def process_task(
         return True
 
     except Exception as e:
-        # Детальное логирование критических ошибок
         error_type = type(e).__name__
+
+        # TargetClosedError - браузер закрыт при shutdown
+        if "TargetClosedError" in error_type:
+            logger.info(f"[Worker-{worker_id}] Browser closed during task processing (shutdown)")
+            return False
+
+        # Детальное логирование других критических ошибок
         logger.error(
             f"[Worker-{worker_id}] Error processing task #{task.get('id', 'N/A')}: "
             f"{error_type}: {e}",
@@ -386,13 +406,14 @@ async def process_task(
         return False
 
 
-async def run_worker(worker_id: int, pool):
+async def run_worker(worker_id: int, pool, shutdown_event: asyncio.Event):
     """
     Главный цикл одного воркера
 
     Args:
         worker_id: ID воркера (1-15)
         pool: asyncpg connection pool
+        shutdown_event: Event для graceful shutdown
     """
 
     display = f":{worker_id}"
@@ -402,80 +423,95 @@ async def run_worker(worker_id: int, pool):
 
     consecutive_failures = 0  # Счетчик последовательных ошибок
 
-    while True:
-        try:
-            # 1. Взятие pending задачи из БД (атомарно)
-            task = await db.get_pending_task(pool, worker_id)
+    try:
+        while not shutdown_event.is_set():
+            try:
+                # 1. Взятие pending задачи из БД (атомарно)
+                task = await db.get_pending_task(pool, worker_id)
 
-            if not task:
-                # Нет доступных задач - ждем
-                await asyncio.sleep(5)
-                continue
-
-            logger.info(
-                f"[Worker-{worker_id}] Got task #{task['id']}: {task.get('search_query', 'N/A')}"
-            )
-
-            # 2. Проверка браузера и прокси
-            if not worker_browser.browser or not worker_browser.current_proxy:
-                # Нужен новый браузер с прокси
-                proxy = await db.get_free_proxy(pool, worker_id)
-
-                if not proxy:
-                    # Нет свободных прокси - освобождаем задачу и ждем
-                    logger.warning(
-                        f"[Worker-{worker_id}] No free proxies available, retrying task"
-                    )
-                    await db.retry_task(pool, task["id"])
-                    await asyncio.sleep(10)
+                if not task:
+                    # Нет доступных задач - ждем
+                    await asyncio.sleep(5)
                     continue
 
-                # Запуск браузера с прокси
-                await worker_browser.start(proxy)
+                logger.info(
+                    f"[Worker-{worker_id}] Got task #{task['id']}: {task.get('search_query', 'N/A')}"
+                )
 
-            # 3. Обработка задачи
-            success = await process_task(task, pool, worker_id, worker_browser)
+                # 2. Проверка браузера и прокси
+                if not worker_browser.browser or not worker_browser.current_proxy:
+                    # Нужен новый браузер с прокси
+                    proxy = await db.get_free_proxy(pool, worker_id)
 
-            if success:
-                # Задача успешно выполнена
-                consecutive_failures = 0
-            else:
-                # Задача не выполнена - retry
-                await db.retry_task(pool, task["id"])
+                    if not proxy:
+                        # Нет свободных прокси - освобождаем задачу и ждем
+                        logger.warning(
+                            f"[Worker-{worker_id}] No free proxies available, retrying task"
+                        )
+                        await db.retry_task(pool, task["id"])
+                        await asyncio.sleep(10)
+                        continue
 
-                # Проверка превышения лимита попыток
-                if task["attempts"] + 1 >= MAX_TASK_ATTEMPTS:
-                    logger.error(
-                        f"[Worker-{worker_id}] Task #{task['id']} exceeded max attempts, failing"
-                    )
-                    await db.fail_task(pool, task["id"])
+                    # Запуск браузера с прокси
+                    await worker_browser.start(proxy)
+
+                # 3. Обработка задачи
+                success = await process_task(task, pool, worker_id, worker_browser)
+
+                if success:
+                    # Задача успешно выполнена
                     consecutive_failures = 0
                 else:
-                    consecutive_failures += 1
+                    # Задача не выполнена - retry
+                    await db.retry_task(pool, task["id"])
 
-                    # Перезапуск браузера после 5 ошибок подряд
-                    if consecutive_failures >= 5:
-                        logger.warning(
-                            f"[Worker-{worker_id}] 5 consecutive failures, restarting browser"
+                    # Проверка превышения лимита попыток
+                    if task["attempts"] + 1 >= MAX_TASK_ATTEMPTS:
+                        logger.error(
+                            f"[Worker-{worker_id}] Task #{task['id']} exceeded max attempts, failing"
                         )
-                        await worker_browser.close()
+                        await db.fail_task(pool, task["id"])
                         consecutive_failures = 0
+                    else:
+                        consecutive_failures += 1
 
-            # Небольшая пауза между задачами
-            await asyncio.sleep(0)
+                        # Перезапуск браузера после 5 ошибок подряд
+                        if consecutive_failures >= 5:
+                            logger.warning(
+                                f"[Worker-{worker_id}] 5 consecutive failures, restarting browser"
+                            )
+                            await worker_browser.close()
+                            consecutive_failures = 0
 
-        except Exception as e:
-            # Детальное логирование критической ошибки в главном цикле
-            error_type = type(e).__name__
-            logger.error(
-                f"[Worker-{worker_id}] Critical error in main loop: {error_type}: {e}",
-                exc_info=True
-            )
+                # Небольшая пауза между задачами
+                await asyncio.sleep(0)
 
-            # Освобождаем все ресурсы воркера в БД
-            await db.release_worker_resources(pool, worker_id)
-            await worker_browser.close()
+            except Exception as e:
+                # Детальное логирование критической ошибки в главном цикле
+                error_type = type(e).__name__
+                logger.error(
+                    f"[Worker-{worker_id}] Critical error in main loop: {error_type}: {e}",
+                    exc_info=True
+                )
 
-            # Пауза перед перезапуском цикла
-            logger.info(f"[Worker-{worker_id}] Restarting in 10 seconds...")
-            await asyncio.sleep(10)
+                # Освобождаем все ресурсы воркера в БД
+                await db.release_worker_resources(pool, worker_id)
+                await worker_browser.close()
+
+                # Пауза перед перезапуском цикла
+                logger.info(f"[Worker-{worker_id}] Restarting in 10 seconds...")
+                await asyncio.sleep(10)
+
+    except asyncio.CancelledError:
+        # Graceful shutdown: немедленно закрываем браузер и освобождаем ресурсы
+        logger.info(f"[Worker-{worker_id}] Received signal 2, initiating shutdown...")
+        await worker_browser.close()
+        await db.release_worker_resources(pool, worker_id)
+        logger.info(f"[Worker-{worker_id}] Shutdown complete")
+        raise  # Re-raise для корректной обработки в main
+
+    finally:
+        # Финальная очистка
+        logger.info(f"[Worker-{worker_id}] Cleaning up...")
+        await worker_browser.close()
+        await db.release_worker_resources(pool, worker_id)

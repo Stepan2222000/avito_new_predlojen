@@ -7,9 +7,11 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Установка системных зависимостей
+# git - для установки avito-library из GitHub
 # xvfb - виртуальные X дисплеи для каждого воркера
 # procps - утилиты (pkill для cleanup в start_xvfb.sh)
 RUN apt-get update && apt-get install -y \
+    git \
     xvfb \
     procps \
     && rm -rf /var/lib/apt/lists/*

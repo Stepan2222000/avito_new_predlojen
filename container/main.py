@@ -111,9 +111,9 @@ async def main():
         cleanup_task = asyncio.create_task(periodic_cleanup(db_pool))
         logger.info("Cleanup task started")
 
-        # Запуск воркеров
+        # Запуск воркеров с передачей shutdown_event
         worker_tasks = [
-            asyncio.create_task(run_worker(worker_id, db_pool))
+            asyncio.create_task(run_worker(worker_id, db_pool, shutdown_event))
             for worker_id in range(1, worker_count + 1)
         ]
         logger.info(f"Started {worker_count} worker tasks")

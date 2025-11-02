@@ -257,24 +257,22 @@ async def filter_listings_batch(
         if blocklist_mode == 'global':
             # Global режим: проверяем blocklist_items_global
             rows = await conn.fetch("""
-                SELECT unnest($1::text[]) as item_id, unnest($2::text[]) as seller_name
-                EXCEPT
-                (
+                WITH all_listings AS (
                     SELECT unnest($1::text[]) as item_id, unnest($2::text[]) as seller_name
-                    WHERE unnest($1::text[]) IN (SELECT item_id FROM blocklist_items_global)
-                       OR unnest($2::text[]) IN (SELECT seller_name FROM blocklist_sellers)
                 )
+                SELECT * FROM all_listings
+                WHERE item_id NOT IN (SELECT item_id FROM blocklist_items_global)
+                  AND seller_name NOT IN (SELECT seller_name FROM blocklist_sellers)
             """, item_ids, seller_names)
         else:  # local
             # Local режим: проверяем blocklist_items_local для группы
             rows = await conn.fetch("""
-                SELECT unnest($1::text[]) as item_id, unnest($2::text[]) as seller_name
-                EXCEPT
-                (
+                WITH all_listings AS (
                     SELECT unnest($1::text[]) as item_id, unnest($2::text[]) as seller_name
-                    WHERE (unnest($1::text[]), $3) IN (SELECT item_id, group_name FROM blocklist_items_local)
-                       OR unnest($2::text[]) IN (SELECT seller_name FROM blocklist_sellers)
                 )
+                SELECT * FROM all_listings
+                WHERE item_id NOT IN (SELECT item_id FROM blocklist_items_local WHERE group_name = $3)
+                  AND seller_name NOT IN (SELECT seller_name FROM blocklist_sellers)
             """, item_ids, seller_names, group_name)
 
     # Создаем set незаблокированных item_id

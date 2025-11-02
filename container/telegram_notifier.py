@@ -17,9 +17,6 @@ async def send_notification(chat_id: int, listing: dict):
         if listing.get('price') is not None and listing.get('currency') is not None:
             lines.append(f"{listing['price']} {listing['currency']}")
 
-        if listing.get('location'):
-            lines.append(listing['location'])
-
         lines.append(f"https://www.avito.ru/{listing['item_id']}")
 
         message = "\n".join(lines)
