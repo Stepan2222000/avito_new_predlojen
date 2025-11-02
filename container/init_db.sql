@@ -31,6 +31,7 @@ CREATE TABLE tasks (
     url TEXT NOT NULL,                                 -- URL для парсинга
     search_query TEXT,                                 -- поисковый запрос (может быть NULL)
     status TEXT NOT NULL DEFAULT 'pending',            -- pending | in_progress | completed | failed
+    attempts INTEGER NOT NULL DEFAULT 0,               -- счетчик попыток (max 5)
     locked_at TIMESTAMP,                               -- время захвата воркером
     locked_by INTEGER,                                 -- ID воркера (1-15)
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),

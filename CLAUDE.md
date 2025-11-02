@@ -217,19 +217,11 @@ models={audi: []}
 ### Инвариант 3: Telegram формат
 
 ```
-{emoji} {title}
-💰 {price} {currency}
-📍 {location}
-🔗 https://www.avito.ru/{item_id}
+{title}
+{price} {currency}
+{location}
+https://www.avito.ru/{item_id}
 ```
-
-Emoji по категориям:
-- avtomobili → 🚗
-- mototsikly → 🏍
-- snegohody → 🛷
-- kvadrotsikly → 🏍
-- gidrotsikly → 🛥
-- katera_i_yahty → ⛵
 
 ### Инвариант 4: Блоклисты
 

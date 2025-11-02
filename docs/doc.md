@@ -78,7 +78,7 @@ https://www.avito.ru/{region_slug}/{category_path}?cd=1&radius=0&searchRadius=0&
 
 ## 3) База данных PostgreSQL
 
-**Подключение:**
+**Подключение (через переменные окружения POSTGRES_*):**
 - Host: `81.30.105.134`
 - Port: `5415`
 - Database: `avito_new_predlojen`
@@ -90,68 +90,59 @@ https://www.avito.ru/{region_slug}/{category_path}?cd=1&radius=0&searchRadius=0&
 ```sql
 -- Группы (зеркало groups.json)
 CREATE TABLE groups (
-    name VARCHAR(255) PRIMARY KEY,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    category VARCHAR(50) NOT NULL,
-    region_slug VARCHAR(100),
-    brands JSONB NOT NULL DEFAULT '[]'::jsonb,
-    models JSONB NOT NULL DEFAULT '{}'::jsonb,
-    all_russia BOOLEAN NOT NULL DEFAULT FALSE,
-    enrich_q BOOLEAN NOT NULL DEFAULT FALSE,
-    blocklist_mode VARCHAR(10) NOT NULL CHECK (blocklist_mode IN ('global', 'local')),
-    telegram_chat_id BIGINT NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+    name TEXT PRIMARY KEY,
+    enabled BOOLEAN NOT NULL,
+    category TEXT NOT NULL,
+    region_slug TEXT NOT NULL,
+    brands TEXT[] NOT NULL,
+    models JSONB NOT NULL,
+    all_russia BOOLEAN NOT NULL,
+    enrich_q BOOLEAN NOT NULL,
+    blocklist_mode TEXT NOT NULL,
+    telegram_chat_id BIGINT NOT NULL
 );
 
 -- Задачи (URL для парсинга)
 CREATE TABLE tasks (
     id SERIAL PRIMARY KEY,
-    group_name VARCHAR(255) NOT NULL REFERENCES groups(name) ON DELETE CASCADE,
+    group_name TEXT NOT NULL REFERENCES groups(name),
     url TEXT NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed')),
+    search_query TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
     locked_at TIMESTAMP,
-    worker_id INTEGER,
+    locked_by INTEGER,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 -- Результаты парсинга
 CREATE TABLE parsed_items (
-    id SERIAL PRIMARY KEY,
-    item_id VARCHAR(50) UNIQUE NOT NULL,
-    group_name VARCHAR(255) NOT NULL,
+    item_id TEXT PRIMARY KEY,
+    group_name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    price TEXT,
+    currency TEXT,
+    seller_name TEXT,
+    location TEXT,
+    published TEXT,
     url TEXT NOT NULL,
-    title TEXT,
-    price DECIMAL(15, 2),
-    currency VARCHAR(10),
-    seller_name VARCHAR(255),
-    location VARCHAR(255),
-    published_date VARCHAR(100),
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+    parsed_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 -- Блоклисты
-CREATE TABLE blocklist_items_global (item_id VARCHAR(50) PRIMARY KEY, created_at TIMESTAMP NOT NULL DEFAULT NOW());
-CREATE TABLE blocklist_items_local (item_id VARCHAR(50) NOT NULL, group_name VARCHAR(255) NOT NULL REFERENCES groups(name) ON DELETE CASCADE, created_at TIMESTAMP NOT NULL DEFAULT NOW(), PRIMARY KEY (item_id, group_name));
-CREATE TABLE blocklist_sellers (seller_name VARCHAR(255) PRIMARY KEY, created_at TIMESTAMP NOT NULL DEFAULT NOW());
+CREATE TABLE blocklist_items_global (item_id TEXT PRIMARY KEY, added_at TIMESTAMP NOT NULL DEFAULT NOW());
+CREATE TABLE blocklist_items_local (item_id TEXT NOT NULL, group_name TEXT NOT NULL REFERENCES groups(name), added_at TIMESTAMP NOT NULL DEFAULT NOW(), PRIMARY KEY (item_id, group_name));
+CREATE TABLE blocklist_sellers (seller_name TEXT PRIMARY KEY, added_at TIMESTAMP NOT NULL DEFAULT NOW());
 
 -- Прокси
 CREATE TABLE proxies (
     id SERIAL PRIMARY KEY,
-    server VARCHAR(255) NOT NULL,
-    username VARCHAR(255),
-    password VARCHAR(255),
+    proxy_url TEXT NOT NULL UNIQUE,
     is_banned BOOLEAN NOT NULL DEFAULT FALSE,
-    ban_reason TEXT,
-    worker_id INTEGER,
     locked_at TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    UNIQUE(server, username)
+    locked_by INTEGER,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 -- Индексы (основные)
@@ -199,7 +190,7 @@ exec python /app/main.py
 
 1. **Взятие задачи из БД:**
    ```sql
-   UPDATE tasks SET status='in_progress', locked_at=NOW(), worker_id=$1
+   UPDATE tasks SET status='in_progress', locked_at=NOW(), locked_by=$1
    WHERE id = (SELECT id FROM tasks WHERE status='pending' AND group_name IN (SELECT name FROM groups WHERE enabled=TRUE) ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *;
    ```
 
@@ -229,9 +220,10 @@ exec python /app/main.py
    - `NOT_DETECTED` → retry по политике
 
 6. **Фильтрация listings:**
-   - Проверка: `"сегодня" in listing.published.lower()` ИЛИ `listing.published is None/empty`
-   - Проверка: `listing.seller_name NOT IN blocklist_sellers`
-   - Проверка: `listing.item_id NOT IN blocklist_items` (глобальный если blocklist_mode='global', локальный если blocklist_mode='local')
+   - Проверка 1 (в Python): `"сегодня" in listing.published.lower()` ИЛИ `listing.published is None/empty`
+   - Проверка 2-3 (batch в SQL): `filter_listings_batch()` проверяет все объявления одним запросом к БД
+     - seller_name NOT IN blocklist_sellers
+     - item_id NOT IN blocklist (global или local в зависимости от blocklist_mode)
 
 7. **Сохранение:**
    ```python
@@ -240,9 +232,9 @@ exec python /app/main.py
        await save_item({...})  # UPSERT в parsed_items
 
        try:
-           await send_to_telegram(task.group.telegram_chat_id, listing, task.group.category)
+           await send_notification(task.group.telegram_chat_id, listing)
        except Exception as e:
-           await fail_task(task.id, f"Telegram failed: {e}")
+           await fail_task(task.id)
            return  # Задача неуспешна
 
        # Telegram успешно → добавляем в блоклист
@@ -263,7 +255,7 @@ exec python /app/main.py
 
 **Циклическая обработка:**
 - Создание: `status='pending'`
-- Взятие воркером: `status='in_progress'`, `locked_at=NOW()`, `worker_id=X`
+- Взятие воркером: `status='in_progress'`, `locked_at=NOW()`, `locked_by=X`
 - Успех: `status='completed'` → через 1 сек → `status='pending'` (новый круг)
 - Ошибка: `attempts++`, если `<5` → `status='pending'` (retry), иначе `status='failed'`
 
@@ -288,10 +280,14 @@ exec python /app/main.py
 
 **Логика проверки:**
 ```python
-if task.group.blocklist_mode == 'global':
-    blocked_items = await get_blocked_items_global()
-else:  # local
-    blocked_items = await get_blocked_items_local(task.group_name)
+# Batch-фильтрация всех listings одним SQL запросом
+filtered_listings = await filter_listings_batch(
+    pool,
+    listings,
+    task.group.blocklist_mode,
+    task.group_name
+)
+# Возвращает только незаблокированные объявления
 ```
 
 ---
@@ -306,19 +302,11 @@ else:  # local
 
 **Формат сообщения:**
 ```
-{emoji} {title}
-💰 {price} {currency}
-📍 {location}
-🔗 https://www.avito.ru/{item_id}
+{title}
+{price} {currency}
+{location}
+https://www.avito.ru/{item_id}
 ```
-
-**Emoji по категориям:**
-- `avtomobili` → 🚗
-- `mototsikly` → 🏍
-- `snegohody` → 🛷
-- `kvadrotsikly` → 🏍
-- `gidrotsikly` → 🛥
-- `katera_i_yahty` → ⛵
 
 **Обработка ошибок:**
 - Если `send_message()` упал → задача неуспешна, `attempts++`
@@ -344,8 +332,8 @@ else:  # local
 ## 10) Скрипты управления (scripts/)
 
 **Подключение к БД в скриптах:**
-- Все скрипты читают настройки БД через `os.getenv()`: DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
-- Можно запускать с переменными окружения: `DB_HOST=... DB_PORT=... python scripts/load_proxies.py`
+- Все скрипты читают настройки БД через `os.getenv()`: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+- Можно запускать с переменными окружения: `POSTGRES_HOST=... POSTGRES_PORT=... python scripts/load_proxies.py`
 
 **1. load_proxies.py:**
 - Чтение `scripts/data/proxies.txt`
@@ -419,11 +407,11 @@ services:
     volumes:
       - ../scripts/data:/app/data
     environment:
-      - DB_HOST=81.30.105.134
-      - DB_PORT=5415
-      - DB_NAME=avito_new_predlojen
-      - DB_USER=admin
-      - DB_PASS=Password123
+      - POSTGRES_HOST=81.30.105.134
+      - POSTGRES_PORT=5415
+      - POSTGRES_DB=avito_new_predlojen
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=Password123
       - WORKER_COUNT=15
       - TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
       - MAX_TASK_ATTEMPTS=5

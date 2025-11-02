@@ -6,7 +6,7 @@ Avito Parser Database Module
 import os
 import asyncio
 import logging
-from typing import Optional, Dict, Any, Set
+from typing import Optional, Dict, Any, List
 
 import asyncpg
 
@@ -63,6 +63,7 @@ async def get_pending_task(pool: asyncpg.Pool, worker_id: int) -> Optional[Dict[
     """
     Атомарный захват первой pending задачи (FOR UPDATE SKIP LOCKED).
     Обновляет статус на 'in_progress' и блокирует воркером.
+    Возвращает данные задачи с JOIN к groups для получения telegram_chat_id и blocklist_mode.
 
     Args:
         pool: Пул подключений
@@ -73,14 +74,16 @@ async def get_pending_task(pool: asyncpg.Pool, worker_id: int) -> Optional[Dict[
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Атомарный захват pending задачи
+            # Атомарный захват pending задачи с JOIN к groups
             row = await conn.fetchrow("""
-                SELECT id, group_name, url, search_query, status, created_at
-                FROM tasks
-                WHERE status = 'pending'
-                ORDER BY created_at
+                SELECT t.id, t.group_name, t.url, t.search_query, t.status, t.attempts, t.created_at,
+                       g.telegram_chat_id, g.blocklist_mode
+                FROM tasks t
+                JOIN groups g ON t.group_name = g.name
+                WHERE t.status = 'pending' AND g.enabled = TRUE
+                ORDER BY t.created_at
                 LIMIT 1
-                FOR UPDATE SKIP LOCKED
+                FOR UPDATE OF t SKIP LOCKED
             """)
 
             if not row:
@@ -166,6 +169,28 @@ async def fail_task(pool: asyncpg.Pool, task_id: int) -> None:
     logger.warning(f"Task {task_id} marked as failed")
 
 
+async def retry_task(pool: asyncpg.Pool, task_id: int) -> None:
+    """
+    Возвращает задачу в pending с увеличением счетчика попыток.
+
+    Args:
+        pool: Пул подключений
+        task_id: ID задачи
+    """
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE tasks
+            SET status = 'pending',
+                attempts = attempts + 1,
+                locked_at = NULL,
+                locked_by = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+        """, task_id)
+
+    logger.info(f"Task {task_id} scheduled for retry (attempts incremented)")
+
+
 # ======================================
 # 3. Работа с распарсенными объявлениями
 # ======================================
@@ -200,58 +225,71 @@ async def save_item(pool: asyncpg.Pool, item_data: Dict[str, Any]) -> None:
 
 
 # ======================================
-# 4. Работа с блоклистами (чтение)
+# 4. Batch-фильтрация listings через SQL
 # ======================================
-async def get_blocked_items_global(pool: asyncpg.Pool) -> Set[str]:
+async def filter_listings_batch(
+    pool: asyncpg.Pool,
+    listings: List[Dict[str, Any]],
+    blocklist_mode: str,
+    group_name: str
+) -> List[Dict[str, Any]]:
     """
-    Получает все item_id из глобального блоклиста.
+    Batch-фильтрация listings через SQL (без загрузки блоклистов в память).
+    Проверяет все listings одним запросом.
+
+    Проверки:
+    1. seller_name NOT IN blocklist_sellers
+    2. item_id NOT IN blocklist (global или local в зависимости от режима)
 
     Args:
         pool: Пул подключений
+        listings: Список объявлений для проверки
+        blocklist_mode: 'global' или 'local'
+        group_name: Имя группы (для local режима)
 
     Returns:
-        Set[str]: Множество заблокированных item_id
+        Только незаблокированные listings
     """
+    if not listings:
+        return []
+
+    # Извлекаем массивы item_id и seller_name
+    item_ids = [listing['item_id'] for listing in listings]
+    seller_names = [listing.get('seller_name') for listing in listings]
+
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT item_id FROM blocklist_items_global")
+        if blocklist_mode == 'global':
+            # Global режим: проверяем blocklist_items_global
+            rows = await conn.fetch("""
+                SELECT unnest($1::text[]) as item_id, unnest($2::text[]) as seller_name
+                EXCEPT
+                (
+                    SELECT unnest($1::text[]) as item_id, unnest($2::text[]) as seller_name
+                    WHERE unnest($1::text[]) IN (SELECT item_id FROM blocklist_items_global)
+                       OR unnest($2::text[]) IN (SELECT seller_name FROM blocklist_sellers)
+                )
+            """, item_ids, seller_names)
+        else:  # local
+            # Local режим: проверяем blocklist_items_local для группы
+            rows = await conn.fetch("""
+                SELECT unnest($1::text[]) as item_id, unnest($2::text[]) as seller_name
+                EXCEPT
+                (
+                    SELECT unnest($1::text[]) as item_id, unnest($2::text[]) as seller_name
+                    WHERE (unnest($1::text[]), $3) IN (SELECT item_id, group_name FROM blocklist_items_local)
+                       OR unnest($2::text[]) IN (SELECT seller_name FROM blocklist_sellers)
+                )
+            """, item_ids, seller_names, group_name)
 
-    return {row['item_id'] for row in rows}
+    # Создаем set незаблокированных item_id
+    allowed_item_ids = {row['item_id'] for row in rows}
 
+    # Фильтруем исходный список
+    filtered = [listing for listing in listings if listing['item_id'] in allowed_item_ids]
 
-async def get_blocked_items_local(pool: asyncpg.Pool, group_name: str) -> Set[str]:
-    """
-    Получает все item_id из локального блоклиста для конкретной группы.
+    logger.info(f"Batch filter: {len(listings)} listings → {len(filtered)} after blocklist check")
 
-    Args:
-        pool: Пул подключений
-        group_name: Имя группы
-
-    Returns:
-        Set[str]: Множество заблокированных item_id для группы
-    """
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT item_id FROM blocklist_items_local
-            WHERE group_name = $1
-        """, group_name)
-
-    return {row['item_id'] for row in rows}
-
-
-async def get_blocked_sellers(pool: asyncpg.Pool) -> Set[str]:
-    """
-    Получает все имена продавцов из глобального блоклиста.
-
-    Args:
-        pool: Пул подключений
-
-    Returns:
-        Set[str]: Множество заблокированных seller_name
-    """
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT seller_name FROM blocklist_sellers")
-
-    return {row['seller_name'] for row in rows}
+    return filtered
 
 
 # ======================================
