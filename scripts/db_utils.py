@@ -104,7 +104,7 @@ async def upsert_group(conn: asyncpg.Connection, group_dict: Dict[str, Any]) -> 
     await conn.execute("""
         INSERT INTO groups (
             name, enabled, category, region_slug, brands, models,
-            all_russia, enrich_q, blocklist_mode, telegram_chat_id
+            all_russia, enrich_q, blocklist_mode, telegram_chat_ids
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (name) DO UPDATE SET
             enabled = EXCLUDED.enabled,
@@ -115,7 +115,7 @@ async def upsert_group(conn: asyncpg.Connection, group_dict: Dict[str, Any]) -> 
             all_russia = EXCLUDED.all_russia,
             enrich_q = EXCLUDED.enrich_q,
             blocklist_mode = EXCLUDED.blocklist_mode,
-            telegram_chat_id = EXCLUDED.telegram_chat_id
+            telegram_chat_ids = EXCLUDED.telegram_chat_ids
     """,
         group_dict['name'],
         group_dict['enabled'],
@@ -126,7 +126,7 @@ async def upsert_group(conn: asyncpg.Connection, group_dict: Dict[str, Any]) -> 
         group_dict['all_russia'],
         group_dict['enrich_q'],
         group_dict['blocklist_mode'],
-        group_dict['telegram_chat_id']
+        group_dict['telegram_chat_ids']
     )
 
     logger.info(f"Successfully upserted group '{group_dict['name']}'")

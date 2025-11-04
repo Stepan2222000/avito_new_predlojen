@@ -1,0 +1,9 @@
+# Virtual environments
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Kanban generated data
+.kanbn_boards/**/.kanbn/cache/

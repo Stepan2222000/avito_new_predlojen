@@ -44,7 +44,7 @@ def validate_group(group: Dict[str, Any], group_idx: int) -> None:
     """
     required_fields = [
         'name', 'enabled', 'category', 'region_slug', 'brands', 'models',
-        'all_russia', 'enrich_q', 'blocklist_mode', 'telegram_chat_id'
+        'all_russia', 'enrich_q', 'blocklist_mode'
     ]
 
     for field in required_fields:
@@ -71,8 +71,27 @@ def validate_group(group: Dict[str, Any], group_idx: int) -> None:
             f"Group {group_idx}: 'blocklist_mode' must be 'global' or 'local'"
         )
 
-    if not isinstance(group['telegram_chat_id'], int):
-        raise ValueError(f"Group {group_idx}: 'telegram_chat_id' must be integer")
+    # Поддержка telegram_chat_id (старый формат) и telegram_chat_ids (новый формат)
+    if 'telegram_chat_id' in group:
+        # Старый формат: конвертируем int в list
+        if not isinstance(group['telegram_chat_id'], int):
+            raise ValueError(f"Group {group_idx}: 'telegram_chat_id' must be integer")
+        group['telegram_chat_ids'] = [group['telegram_chat_id']]
+        del group['telegram_chat_id']
+    elif 'telegram_chat_ids' in group:
+        # Новый формат: проверяем list[int]
+        if isinstance(group['telegram_chat_ids'], int):
+            # Автоматическая конвертация int → list
+            group['telegram_chat_ids'] = [group['telegram_chat_ids']]
+        elif isinstance(group['telegram_chat_ids'], list):
+            if not all(isinstance(cid, int) for cid in group['telegram_chat_ids']):
+                raise ValueError(f"Group {group_idx}: 'telegram_chat_ids' must be list of integers")
+            if len(group['telegram_chat_ids']) == 0:
+                raise ValueError(f"Group {group_idx}: 'telegram_chat_ids' cannot be empty")
+        else:
+            raise ValueError(f"Group {group_idx}: 'telegram_chat_ids' must be integer or list of integers")
+    else:
+        raise ValueError(f"Group {group_idx}: missing 'telegram_chat_id' or 'telegram_chat_ids'")
 
 
 def extract_search_query(url: str) -> str:

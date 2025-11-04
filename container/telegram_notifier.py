@@ -1,4 +1,5 @@
 import os
+import asyncio
 from aiogram import Bot
 
 # Глобальный экземпляр бота (один для всех воркеров)
@@ -26,3 +27,22 @@ async def send_notification(chat_id: int, listing: dict):
     except Exception:
         # Re-raise для retry на уровне worker
         raise
+
+
+async def send_notification_to_multiple(chat_ids: list[int], listing: dict) -> dict[int, bool]:
+    """
+    Отправка уведомления нескольким получателям параллельно.
+
+    Возвращает словарь {chat_id: success_status}
+    """
+    async def send_to_one(chat_id: int) -> tuple[int, bool]:
+        try:
+            await send_notification(chat_id, listing)
+            return (chat_id, True)
+        except Exception:
+            return (chat_id, False)
+
+    # Параллельная отправка всем получателям
+    results = await asyncio.gather(*[send_to_one(cid) for cid in chat_ids])
+
+    return dict(results)

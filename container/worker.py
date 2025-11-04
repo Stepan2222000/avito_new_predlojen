@@ -26,7 +26,7 @@ from avito_library.detectors import (
 from avito_library.parsers.catalog_parser import CatalogParseStatus
 
 import db
-from telegram_notifier import send_notification
+from telegram_notifier import send_notification_to_multiple
 
 # Константы из environment
 CAPTCHA_MAX_ATTEMPTS = int(os.getenv("CAPTCHA_MAX_ATTEMPTS", "10"))
@@ -54,9 +54,6 @@ class WorkerBrowser:
         # Закрыть предыдущий браузер если был открыт
         await self.close()
 
-        # Установить DISPLAY для текущего воркера (только для Linux с Xvfb)
-        # os.environ["DISPLAY"] = self.display  # Отключено для Mac
-
         # Парсинг прокси (формат: IP:PORT:USER:PASS)
         proxy_parts = proxy.split(":")
         server = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
@@ -65,6 +62,12 @@ class WorkerBrowser:
 
         # Запуск Playwright с chromium
         self.playwright = await async_playwright().start()
+
+        # Настройка окружения с DISPLAY для Xvfb (только в Docker/Linux)
+        import os
+        browser_env = os.environ.copy()
+        browser_env["DISPLAY"] = self.display
+
         self.browser = await self.playwright.chromium.launch(
             headless=False,  # ВАЖНО: headless=False + Xvfb
             proxy={
@@ -72,6 +75,7 @@ class WorkerBrowser:
                 "username": username,
                 "password": password,
             },
+            env=browser_env,  # Передаем DISPLAY в процесс Chromium
         )
 
         # Создание контекста и долгоживущей page
@@ -346,33 +350,58 @@ async def process_task(
                 # Создаём обогащённый словарь для Telegram
                 enriched_listing = {**listing, "currency": currency}
 
-                # Отправка уведомления в Telegram
-                await send_notification(task["telegram_chat_id"], enriched_listing)
-                logger.info(
-                    f"[Worker-{worker_id}] Sent notification for {listing['item_id']}"
-                )
+                # Отправка уведомления нескольким получателям
+                chat_ids = task["telegram_chat_ids"]
+                send_results = await send_notification_to_multiple(chat_ids, enriched_listing)
 
-                # ТОЛЬКО после успешной отправки добавляем в блоклисты
-                await db.add_to_blocklist_global(pool, listing["item_id"])
-                await db.add_to_blocklist_local(
-                    pool, listing["item_id"], task["group_name"]
-                )
+                # Логирование результатов отправки
+                success_count = sum(1 for success in send_results.values() if success)
+                failed_count = len(send_results) - success_count
 
-                # Сохранение в историю parsed_items
-                price_value = listing.get("price")
-                await db.save_item(
-                    pool,
-                    {
-                        "item_id": listing["item_id"],
-                        "group_name": task["group_name"],
-                        "title": listing.get("title"),
-                        "price": str(price_value) if price_value is not None else None,
-                        "currency": currency,
-                        "seller_name": listing.get("seller_name"),
-                        "published": listing.get("published"),
-                        "url": f"https://www.avito.ru/{listing['item_id']}",
-                    },
-                )
+                for chat_id, success in send_results.items():
+                    if success:
+                        logger.info(
+                            f"[Worker-{worker_id}] Sent notification for {listing['item_id']} to {chat_id}"
+                        )
+                    else:
+                        logger.error(
+                            f"[Worker-{worker_id}] Failed to send notification for {listing['item_id']} to {chat_id}"
+                        )
+
+                # Вариант А: добавляем в блоклист если хотя бы одна отправка успешна
+                if success_count > 0:
+                    # ТОЛЬКО после успешной отправки добавляем в блоклисты
+                    await db.add_to_blocklist_global(pool, listing["item_id"])
+                    await db.add_to_blocklist_local(
+                        pool, listing["item_id"], task["group_name"]
+                    )
+
+                    # Сохранение в историю parsed_items
+                    price_value = listing.get("price")
+                    await db.save_item(
+                        pool,
+                        {
+                            "item_id": listing["item_id"],
+                            "group_name": task["group_name"],
+                            "title": listing.get("title"),
+                            "price": str(price_value) if price_value is not None else None,
+                            "currency": currency,
+                            "seller_name": listing.get("seller_name"),
+                            "published": listing.get("published"),
+                            "url": f"https://www.avito.ru/{listing['item_id']}",
+                        },
+                    )
+
+                    logger.info(
+                        f"[Worker-{worker_id}] Added {listing['item_id']} to blocklist "
+                        f"(sent to {success_count}/{len(send_results)} recipients)"
+                    )
+                else:
+                    # Все отправки упали - retry задачи
+                    logger.error(
+                        f"[Worker-{worker_id}] All Telegram sends failed for {listing['item_id']} - task will retry"
+                    )
+                    return False
 
             except Exception as e:
                 # Ошибка отправки в Telegram - НЕ добавляем в блоклист

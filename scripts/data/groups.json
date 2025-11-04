@@ -1,18 +1,6 @@
 {
   "groups": [
     {
-      "name": "auto_msk",
-      "enabled": false,
-      "category": "avtomobili",
-      "region_slug": "moskva",
-      "brands": ["audi", "bmw"],
-      "models": {"audi": ["a6", "q7"], "bmw": ["x5"]},
-      "all_russia": false,
-      "enrich_q": false,
-      "blocklist_mode": "global",
-      "telegram_chat_id": 779088495
-    },
-    {
       "name": "boats_russia",
       "enabled": true,
       "category": "katera_i_yahty",
@@ -22,7 +10,7 @@
       "all_russia": true,
       "enrich_q": false,
       "blocklist_mode": "global",
-      "telegram_chat_id": 779088495
+      "telegram_chat_ids": [779088495, 6428540024]
     }
   ]
 }

@@ -59,7 +59,7 @@ async def get_pending_task(pool: asyncpg.Pool, worker_id: int) -> Optional[Dict[
     """
     Атомарный захват первой pending задачи (FOR UPDATE SKIP LOCKED).
     Обновляет статус на 'in_progress' и блокирует воркером.
-    Возвращает данные задачи с JOIN к groups для получения telegram_chat_id и blocklist_mode.
+    Возвращает данные задачи с JOIN к groups для получения telegram_chat_ids и blocklist_mode.
 
     Args:
         pool: Пул подключений
@@ -73,7 +73,7 @@ async def get_pending_task(pool: asyncpg.Pool, worker_id: int) -> Optional[Dict[
             # Атомарный захват pending задачи с JOIN к groups
             row = await conn.fetchrow("""
                 SELECT t.id, t.group_name, t.url, t.search_query, t.status, t.attempts, t.created_at,
-                       g.telegram_chat_id, g.blocklist_mode
+                       g.telegram_chat_ids, g.blocklist_mode
                 FROM tasks t
                 JOIN groups g ON t.group_name = g.name
                 WHERE t.status = 'pending' AND g.enabled = TRUE
