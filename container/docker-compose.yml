@@ -21,7 +21,7 @@ services:
 
       # Настройки воркеров и лимиты
       WORKER_COUNT: 3
-      MAX_TASK_ATTEMPTS: 5
+      MAX_TASK_ATTEMPTS: 20
       TASK_LOCK_TIMEOUT_MINUTES: 10
       PROXY_LOCK_TIMEOUT_MINUTES: 30
       CAPTCHA_MAX_ATTEMPTS: 10

@@ -80,6 +80,8 @@ class WorkerBrowser:
 
         # Создание контекста и долгоживущей page
         context = await self.browser.new_context()
+        # Установка глобального таймаута для всех навигаций
+        context.set_default_navigation_timeout(60000)  # 60 секунд
         self.page = await context.new_page()
         self.current_proxy = proxy
 
@@ -164,8 +166,11 @@ async def handle_page_state(
         logger.warning(f"[Worker-{worker_id}] Proxy blocked 403/407, banning proxy...")
         await db.ban_proxy(pool, worker_browser.current_proxy)
         await db.release_proxy(pool, worker_id)
-        # Перезапуск браузера после бана прокси
-        await worker_browser.close()
+        # Перезапуск браузера после бана прокси (safe close)
+        try:
+            await worker_browser.close()
+        except Exception as e:
+            logger.error(f"[Worker-{worker_id}] Failed to close browser after proxy ban: {e}")
         return state, True
 
     # Каталог - продолжаем нормальный парсинг
@@ -185,13 +190,14 @@ async def handle_page_state(
 
 async def process_task(
     task: Dict, pool, worker_id: int, worker_browser: WorkerBrowser
-) -> bool:
+):
     """
     Обработка одной задачи парсинга
 
     Returns:
         True - задача успешно выполнена
-        False - нужен retry задачи
+        "navigation_error" - ошибка загрузки страницы (инкрементировать attempts)
+        False - infrastructure issue: капча, 429, Telegram, прокси (НЕ инкрементировать attempts)
     """
 
     try:
@@ -199,9 +205,35 @@ async def process_task(
 
         # 1. Переход на URL каталога
         logger.info(f"[Worker-{worker_id}] Navigating to {task['url']}")
-        response = await page.goto(
-            task["url"], wait_until="domcontentloaded", timeout=30000
-        )
+
+        try:
+            response = await page.goto(
+                task["url"], wait_until="domcontentloaded", timeout=60000
+            )
+        except Exception as nav_error:
+            # Ошибка навигации (timeout, network error, etc) - это navigation_error
+            error_type = type(nav_error).__name__
+
+            # Специальная обработка TimeoutError - освобождаем прокси
+            if "TimeoutError" in error_type or "Timeout" in str(nav_error):
+                logger.warning(
+                    f"[Worker-{worker_id}] Navigation timeout for task #{task['id']} (slow proxy?), "
+                    f"releasing proxy and closing browser"
+                )
+                # Освобождаем прокси для смены (как при капче)
+                await db.release_proxy(pool, worker_id)
+                # Закрываем браузер для принудительной смены прокси при retry
+                try:
+                    await worker_browser.close()
+                except Exception as close_err:
+                    logger.error(f"[Worker-{worker_id}] Failed to close browser after timeout: {close_err}")
+            else:
+                logger.error(
+                    f"[Worker-{worker_id}] Navigation error for task #{task['id']}: "
+                    f"{error_type}: {nav_error}"
+                )
+
+            return "navigation_error"
 
         # 2. Детектирование состояния страницы
         state = await detect_page_state(page, last_response=response)
@@ -273,8 +305,11 @@ async def process_task(
             logger.warning(f"[Worker-{worker_id}] Proxy blocked from parse_catalog")
             await db.ban_proxy(pool, worker_browser.current_proxy)
             await db.release_proxy(pool, worker_id)
-            # Перезапуск браузера после бана прокси
-            await worker_browser.close()
+            # Перезапуск браузера после бана прокси (safe close)
+            try:
+                await worker_browser.close()
+            except Exception as e:
+                logger.error(f"[Worker-{worker_id}] Failed to close browser after proxy ban: {e}")
             return False
 
         elif meta.status == CatalogParseStatus.NOT_DETECTED:
@@ -421,12 +456,27 @@ async def process_task(
     except Exception as e:
         error_type = type(e).__name__
 
-        # TargetClosedError - браузер закрыт при shutdown
+        # TargetClosedError - браузер закрыт при shutdown (infrastructure issue)
         if "TargetClosedError" in error_type:
             logger.info(f"[Worker-{worker_id}] Browser closed during task processing (shutdown)")
             return False
 
-        # Детальное логирование других критических ошибок
+        # TimeoutError при работе с Playwright - освобождаем прокси
+        if "TimeoutError" in error_type or "NavigationError" in error_type:
+            logger.warning(
+                f"[Worker-{worker_id}] Navigation/Timeout error for task #{task.get('id', 'N/A')}: "
+                f"{error_type}: {e} - releasing proxy"
+            )
+            # Освобождаем прокси для смены (как при капче)
+            await db.release_proxy(pool, worker_id)
+            # Закрываем браузер для принудительной смены прокси при retry
+            try:
+                await worker_browser.close()
+            except Exception as close_err:
+                logger.error(f"[Worker-{worker_id}] Failed to close browser after timeout: {close_err}")
+            return "navigation_error"
+
+        # Другие критические ошибки - infrastructure issues (parsing errors, etc)
         logger.error(
             f"[Worker-{worker_id}] Error processing task #{task.get('id', 'N/A')}: "
             f"{error_type}: {e}",
@@ -473,10 +523,14 @@ async def run_worker(worker_id: int, pool, shutdown_event: asyncio.Event):
                     proxy = await db.get_free_proxy(pool, worker_id)
 
                     if not proxy:
-                        # Нет свободных прокси - освобождаем задачу и ждем
+                        # Нет свободных прокси - закрываем браузер, освобождаем задачу и ждем
                         logger.warning(
-                            f"[Worker-{worker_id}] No free proxies available, retrying task"
+                            f"[Worker-{worker_id}] No free proxies available, closing browser and retrying task"
                         )
+                        # Закрываем браузер если он был открыт с предыдущим прокси
+                        if worker_browser.browser:
+                            await worker_browser.close()
+
                         await db.retry_task(pool, task["id"])
                         await asyncio.sleep(10)
                         continue
@@ -485,32 +539,39 @@ async def run_worker(worker_id: int, pool, shutdown_event: asyncio.Event):
                     await worker_browser.start(proxy)
 
                 # 3. Обработка задачи
-                success = await process_task(task, pool, worker_id, worker_browser)
+                result = await process_task(task, pool, worker_id, worker_browser)
 
-                if success:
+                if result is True:
                     # Задача успешно выполнена
                     consecutive_failures = 0
-                else:
-                    # Задача не выполнена - retry
+
+                elif result == "navigation_error":
+                    # Ошибка загрузки страницы - инкрементируем attempts
                     await db.retry_task(pool, task["id"])
 
-                    # Проверка превышения лимита попыток
+                    # Проверка превышения лимита попыток (20 для navigation errors)
                     if task["attempts"] + 1 >= MAX_TASK_ATTEMPTS:
                         logger.error(
-                            f"[Worker-{worker_id}] Task #{task['id']} exceeded max attempts, failing"
+                            f"[Worker-{worker_id}] Task #{task['id']} exceeded max attempts "
+                            f"({MAX_TASK_ATTEMPTS} navigation errors with different proxies), failing"
                         )
                         await db.fail_task(pool, task["id"])
                         consecutive_failures = 0
                     else:
                         consecutive_failures += 1
 
-                        # Перезапуск браузера после 5 ошибок подряд
-                        if consecutive_failures >= 5:
-                            logger.warning(
+                else:  # result is False (infrastructure error)
+                    # Infrastructure issue (капча, 429, Telegram, etc) - НЕ инкрементируем attempts
+                    await db.retry_task_no_increment(pool, task["id"])
+                    consecutive_failures += 1
+
+                # Перезапуск браузера после 5 ошибок подряд
+                if consecutive_failures >= 5:
+                    logger.warning(
                                 f"[Worker-{worker_id}] 5 consecutive failures, restarting browser"
                             )
-                            await worker_browser.close()
-                            consecutive_failures = 0
+                    await worker_browser.close()
+                    consecutive_failures = 0
 
                 # Небольшая пауза между задачами
                 await asyncio.sleep(0)

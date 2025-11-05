@@ -8,6 +8,7 @@ import os
 import sys
 import logging
 import signal
+import random
 from typing import List, Optional
 
 import db
@@ -82,9 +83,9 @@ async def main():
     logger.info(f"Starting Avito Parser with {worker_count} workers")
     logger.info(f"Database: {os.getenv('POSTGRES_HOST', 'localhost')}:{os.getenv('POSTGRES_PORT', '5432')}")
 
-    # Создание БД pool с retry логикой
-    max_retries = 5
-    retry_delay = 5
+    # Создание БД pool с retry логикой и exponential backoff
+    max_retries = 10
+    base_delay = 2  # начальная задержка в секундах
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -99,8 +100,14 @@ async def main():
                 logger.critical("Max retry attempts reached, exiting...")
                 sys.exit(1)
 
-            logger.info(f"Retrying in {retry_delay} seconds...")
-            await asyncio.sleep(retry_delay)
+            # Exponential backoff: 2, 4, 8, 16, 32, 64... (max 60s)
+            delay = min(base_delay * (2 ** (attempt - 1)), 60)
+            # Добавляем jitter (случайное отклонение ±10%)
+            jitter = random.uniform(-0.1 * delay, 0.1 * delay)
+            total_delay = delay + jitter
+
+            logger.info(f"Retrying in {total_delay:.1f} seconds (exponential backoff)...")
+            await asyncio.sleep(total_delay)
 
     # Setup signal handlers
     signal.signal(signal.SIGTERM, handle_shutdown_signal)
