@@ -205,7 +205,7 @@ async def create_tasks_for_group(
         await conn.execute("""
             INSERT INTO tasks (group_name, url, search_query, status)
             VALUES ($1, $2, $3, 'pending')
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (group_name, url) DO NOTHING
         """, group_name, task['url'], task.get('search_query'))
 
         logger.debug(f"Created task {idx}/{len(task_data)}: {task['url']}")
@@ -247,6 +247,23 @@ async def count_tasks_for_group(conn: asyncpg.Connection, group_name: str) -> in
     """, group_name)
 
     return row['count']
+
+
+async def reset_successful_parses_for_groups(conn: asyncpg.Connection, group_names: List[str]) -> None:
+    """
+    Сброс successful_parses для указанных групп.
+    """
+    if not group_names:
+        return
+
+    await conn.execute("""
+        UPDATE tasks
+        SET successful_parses = 0,
+            updated_at = NOW()
+        WHERE group_name = ANY($1::text[])
+    """, group_names)
+
+    logger.info(f"Reset successful_parses for {len(group_names)} group(s)")
 
 
 # ======================================

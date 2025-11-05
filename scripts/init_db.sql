@@ -18,7 +18,7 @@ CREATE TABLE groups (
     all_russia BOOLEAN NOT NULL,            -- поиск по всей России
     enrich_q BOOLEAN NOT NULL,              -- обогащать поисковый запрос родовым словом
     blocklist_mode TEXT NOT NULL,           -- режим блоклиста: 'global' или 'local'
-    telegram_chat_id BIGINT NOT NULL        -- ID чата для уведомлений
+    telegram_chat_ids BIGINT[] NOT NULL     -- массив ID чатов для уведомлений
 );
 
 -- ======================================
@@ -27,15 +27,17 @@ CREATE TABLE groups (
 -- Циклические задачи парсинга с атомарным захватом через FOR UPDATE SKIP LOCKED
 CREATE TABLE tasks (
     id SERIAL PRIMARY KEY,
-    group_name TEXT NOT NULL REFERENCES groups(name),  -- связь с группой
+    group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE,  -- связь с группой
     url TEXT NOT NULL,                                 -- URL для парсинга
     search_query TEXT,                                 -- поисковый запрос (может быть NULL)
     status TEXT NOT NULL DEFAULT 'pending',            -- pending | in_progress | completed | failed
     attempts INTEGER NOT NULL DEFAULT 0,               -- счетчик попыток (max 5)
+    successful_parses INTEGER NOT NULL DEFAULT 0,      -- счетчик успешных парсингов
     locked_at TIMESTAMP,                               -- время захвата воркером
     locked_by INTEGER,                                 -- ID воркера (1-15)
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (group_name, url)                           -- предотвращает дубликаты задач
 );
 
 -- ======================================
@@ -44,7 +46,7 @@ CREATE TABLE tasks (
 -- Хранит результаты парсинга для истории
 CREATE TABLE parsed_items (
     item_id TEXT PRIMARY KEY,                          -- уникальный ID объявления
-    group_name TEXT NOT NULL REFERENCES groups(name),  -- какая группа нашла
+    group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE,  -- какая группа нашла
     title TEXT NOT NULL,                               -- заголовок объявления
     price TEXT,                                        -- цена (может быть NULL)
     currency TEXT,                                     -- валюта
@@ -74,7 +76,7 @@ CREATE TABLE blocklist_items_global (
 -- Проверка: ТОЛЬКО если blocklist_mode='local'
 CREATE TABLE blocklist_items_local (
     item_id TEXT NOT NULL,
-    group_name TEXT NOT NULL REFERENCES groups(name),
+    group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE,
     added_at TIMESTAMP NOT NULL DEFAULT NOW(),
     PRIMARY KEY (item_id, group_name)
 );
@@ -118,3 +120,13 @@ CREATE INDEX idx_proxies_locked_at ON proxies(locked_at);
 
 -- Ускорение запросов локального блоклиста по группе
 CREATE INDEX idx_blocklist_items_local_group ON blocklist_items_local(group_name);
+
+-- Composite index для queue priority (ORDER BY successful_parses ASC, created_at ASC)
+CREATE INDEX idx_tasks_queue_priority ON tasks(status, successful_parses ASC, created_at ASC) WHERE status = 'pending';
+
+-- Ускорение запросов по group_name в parsed_items
+CREATE INDEX idx_parsed_items_group_name ON parsed_items(group_name);
+
+-- Ускорение cleanup по locked_by в tasks и proxies
+CREATE INDEX idx_tasks_locked_by ON tasks(locked_by) WHERE locked_by IS NOT NULL;
+CREATE INDEX idx_proxies_locked_by ON proxies(locked_by) WHERE locked_by IS NOT NULL;

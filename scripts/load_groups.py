@@ -241,11 +241,16 @@ async def main():
         sys.exit(1)
 
     try:
-        # 7. Если режим перезаписи - удаляем все группы
+        # 7. Если режим перезаписи - очищаем задачи для групп из файла
         if overwrite:
-            logger.info("Mode: OVERWRITE - deleting all existing groups")
-            await conn.execute("DELETE FROM groups")
-            logger.info("All groups deleted")
+            group_names = sorted({group['name'] for group in groups})
+            logger.info("Mode: OVERWRITE - refreshing tasks for listed groups")
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM tasks WHERE group_name = ANY($1::text[])",
+                    group_names
+                )
+            logger.info("Tasks cleared for configured groups")
 
         # 8. Обработка каждой группы
         total_tasks = 0
@@ -261,6 +266,9 @@ async def main():
                     exc_info=True
                 )
                 sys.exit(1)
+
+        group_names = sorted({group['name'] for group in groups})
+        await db_utils.reset_successful_parses_for_groups(conn, group_names)
 
         logger.info("="*60)
         logger.info(f"SUCCESS: Loaded {len(groups)} group(s), created {total_tasks} task(s)")

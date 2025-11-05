@@ -34,6 +34,13 @@ async def create_pool() -> asyncpg.Pool:
 
     logger.info(f"Connecting to PostgreSQL: {user}@{host}:{port}/{database}")
 
+    # Рассчитываем pool size на основе количества воркеров
+    worker_count = int(os.getenv("WORKER_COUNT", "10"))
+    min_pool_size = worker_count + 5  # воркеры + cleanup + запас
+    max_pool_size = (worker_count * 3) + 5  # 2-3 соединения на воркера пик
+
+    logger.info(f"Connection pool sizing: min={min_pool_size}, max={max_pool_size} (based on {worker_count} workers)")
+
     try:
         pool = await asyncpg.create_pool(
             host=host,
@@ -41,8 +48,8 @@ async def create_pool() -> asyncpg.Pool:
             database=database,
             user=user,
             password=password,
-            min_size=5,
-            max_size=20,
+            min_size=min_pool_size,
+            max_size=max_pool_size,
             command_timeout=60,  # таймаут для команд
         )
         logger.info("PostgreSQL connection pool created successfully")
@@ -72,12 +79,19 @@ async def get_pending_task(pool: asyncpg.Pool, worker_id: int) -> Optional[Dict[
         async with conn.transaction():
             # Атомарный захват pending задачи с JOIN к groups
             row = await conn.fetchrow("""
+                WITH min_success AS (
+                    SELECT MIN(t2.successful_parses) AS value
+                    FROM tasks t2
+                    JOIN groups g2 ON t2.group_name = g2.name
+                    WHERE t2.status = 'pending' AND g2.enabled = TRUE
+                )
                 SELECT t.id, t.group_name, t.url, t.search_query, t.status, t.attempts, t.created_at,
                        g.telegram_chat_ids, g.blocklist_mode
                 FROM tasks t
                 JOIN groups g ON t.group_name = g.name
+                JOIN min_success ms ON ms.value IS NOT NULL AND t.successful_parses = ms.value
                 WHERE t.status = 'pending' AND g.enabled = TRUE
-                ORDER BY t.created_at
+                ORDER BY t.created_at ASC
                 LIMIT 1
                 FOR UPDATE OF t SKIP LOCKED
             """)
@@ -103,24 +117,49 @@ async def get_pending_task(pool: asyncpg.Pool, worker_id: int) -> Optional[Dict[
 async def complete_task(pool: asyncpg.Pool, task_id: int) -> None:
     """
     Завершает задачу и планирует её возврат в pending через 1 секунду.
+    Инкрементирует счетчик успешных парсингов и сбрасывает attempts.
+
+    Использует background task для неблокирующего возврата в pending,
+    что предотвращает потерю задачи при крэше во время sleep.
 
     Args:
         pool: Пул подключений
         task_id: ID задачи
     """
     async with pool.acquire() as conn:
-        await conn.execute("""
+        row = await conn.fetchrow("""
             UPDATE tasks
             SET status = 'completed',
+                successful_parses = successful_parses + 1,
+                attempts = 0,
+                locked_at = NULL,
+                locked_by = NULL,
                 updated_at = NOW()
             WHERE id = $1
+            RETURNING successful_parses
         """, task_id)
 
-    logger.info(f"Task {task_id} marked as completed")
+    successful_count = row['successful_parses'] if row else 0
+    logger.info(f"Task {task_id} marked as completed (total successful parses: {successful_count})")
 
-    # Планируем возврат в pending через 1 секунду
-    await asyncio.sleep(1)
-    await reset_completed_to_pending(pool, task_id)
+    # Запускаем background task для возврата в pending через 1 секунду
+    # Это не блокирует worker и безопаснее при крэшах
+    asyncio.create_task(_schedule_reset_to_pending(pool, task_id))
+
+
+async def _schedule_reset_to_pending(pool: asyncpg.Pool, task_id: int) -> None:
+    """
+    Background task helper: ждет 1 секунду и возвращает задачу в pending.
+
+    Args:
+        pool: Пул подключений
+        task_id: ID задачи
+    """
+    try:
+        await asyncio.sleep(1)
+        await reset_completed_to_pending(pool, task_id)
+    except Exception as e:
+        logger.error(f"Failed to reset task {task_id} to pending: {e}")
 
 
 async def reset_completed_to_pending(pool: asyncpg.Pool, task_id: int) -> None:
@@ -168,6 +207,7 @@ async def fail_task(pool: asyncpg.Pool, task_id: int) -> None:
 async def retry_task(pool: asyncpg.Pool, task_id: int) -> None:
     """
     Возвращает задачу в pending с увеличением счетчика попыток.
+    Используется только для page.goto() ошибок с разными прокси.
 
     Args:
         pool: Пул подключений
@@ -185,6 +225,28 @@ async def retry_task(pool: asyncpg.Pool, task_id: int) -> None:
         """, task_id)
 
     logger.info(f"Task {task_id} scheduled for retry (attempts incremented)")
+
+
+async def retry_task_no_increment(pool: asyncpg.Pool, task_id: int) -> None:
+    """
+    Возвращает задачу в pending БЕЗ увеличения счетчика попыток.
+    Используется для infrastructure ошибок: капча, 429, NOT_DETECTED, Telegram, прокси.
+
+    Args:
+        pool: Пул подключений
+        task_id: ID задачи
+    """
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE tasks
+            SET status = 'pending',
+                locked_at = NULL,
+                locked_by = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+        """, task_id)
+
+    logger.info(f"Task {task_id} reset to pending (infrastructure issue, attempts NOT incremented)")
 
 
 # ======================================
