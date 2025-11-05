@@ -3,7 +3,6 @@ Database utilities for management scripts
 Принцип: KISS - простые подключения asyncpg, прямые SQL запросы
 """
 
-import os
 import json
 import logging
 from typing import List, Dict, Any, Optional
@@ -20,16 +19,16 @@ logger = logging.getLogger(__name__)
 async def connect_db() -> asyncpg.Connection:
     """
     Создание простого подключения к PostgreSQL.
-    Читает настройки из POSTGRES_* переменных окружения.
+    Использует фиксированные настройки БД.
 
     Returns:
         asyncpg.Connection: Подключение к БД
     """
-    host = os.getenv("POSTGRES_HOST", "localhost")
-    port = int(os.getenv("POSTGRES_PORT", "5432"))
-    database = os.getenv("POSTGRES_DB", "avito_parser")
-    user = os.getenv("POSTGRES_USER", "postgres")
-    password = os.getenv("POSTGRES_PASSWORD", "postgres")
+    host = "81.30.105.134"
+    port = 5415
+    database = "avito_new_predlojen"
+    user = "admin"
+    password = "Password123"
 
     logger.info(f"Connecting to PostgreSQL: {user}@{host}:{port}/{database}")
 
