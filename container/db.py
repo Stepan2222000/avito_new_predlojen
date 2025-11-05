@@ -324,7 +324,10 @@ async def filter_listings_batch(
                 )
                 SELECT * FROM all_listings
                 WHERE item_id NOT IN (SELECT item_id FROM blocklist_items_global)
-                  AND seller_name NOT IN (SELECT seller_name FROM blocklist_sellers)
+                  AND (
+                    seller_name IS NULL
+                    OR seller_name NOT IN (SELECT seller_name FROM blocklist_sellers)
+                  )
             """, item_ids, seller_names)
         else:  # local
             # Local режим: проверяем blocklist_items_local для группы
@@ -334,7 +337,10 @@ async def filter_listings_batch(
                 )
                 SELECT * FROM all_listings
                 WHERE item_id NOT IN (SELECT item_id FROM blocklist_items_local WHERE group_name = $3)
-                  AND seller_name NOT IN (SELECT seller_name FROM blocklist_sellers)
+                  AND (
+                    seller_name IS NULL
+                    OR seller_name NOT IN (SELECT seller_name FROM blocklist_sellers)
+                  )
             """, item_ids, seller_names, group_name)
 
     # Создаем set незаблокированных item_id

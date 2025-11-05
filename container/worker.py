@@ -98,6 +98,8 @@ class WorkerBrowser:
         if self.playwright:
             await self.playwright.stop()
             self.playwright = None
+        # Обнуляем current_proxy при закрытии браузера
+        self.current_proxy = None
 
 
 async def restart_browser_with_proxy(
@@ -154,11 +156,12 @@ async def handle_page_state(
             logger.info(f"[Worker-{worker_id}] Captcha solved, new state: {new_state}")
             return new_state, False
         else:
-            # Капча не решилась - освобождаем прокси для смены
+            # Капча не решилась - освобождаем прокси и закрываем браузер для смены
             logger.warning(
                 f"[Worker-{worker_id}] Captcha unsolved after {CAPTCHA_MAX_ATTEMPTS} attempts"
             )
             await db.release_proxy(pool, worker_id)
+            await worker_browser.close()
             return state, True
 
     # Прокси блокировка 403/407 (постоянный бан)
@@ -171,6 +174,9 @@ async def handle_page_state(
             await worker_browser.close()
         except Exception as e:
             logger.error(f"[Worker-{worker_id}] Failed to close browser after proxy ban: {e}")
+        finally:
+            # Гарантированно обнуляем current_proxy даже если close() упал
+            worker_browser.current_proxy = None
         return state, True
 
     # Каталог - продолжаем нормальный парсинг
@@ -227,6 +233,9 @@ async def process_task(
                     await worker_browser.close()
                 except Exception as close_err:
                     logger.error(f"[Worker-{worker_id}] Failed to close browser after timeout: {close_err}")
+                finally:
+                    # Гарантированно обнуляем current_proxy даже если close() упал
+                    worker_browser.current_proxy = None
             else:
                 logger.error(
                     f"[Worker-{worker_id}] Navigation error for task #{task['id']}: "
@@ -287,8 +296,9 @@ async def process_task(
             )
             html, solved = await resolve_captcha_flow(page, max_attempts=CAPTCHA_MAX_ATTEMPTS)
             if not solved:
-                # Капча все еще не решена - освобождаем прокси и retry
+                # Капча все еще не решена - освобождаем прокси и закрываем браузер
                 await db.release_proxy(pool, worker_id)
+                await worker_browser.close()
             return False
 
         elif meta.status == CatalogParseStatus.RATE_LIMIT:
@@ -296,8 +306,9 @@ async def process_task(
             logger.warning(f"[Worker-{worker_id}] Rate limit from parse_catalog, trying resolve_captcha_flow...")
             html, solved = await resolve_captcha_flow(page, max_attempts=CAPTCHA_MAX_ATTEMPTS)
             if not solved:
-                # Капча не решена - освобождаем прокси и retry
+                # Капча не решена - освобождаем прокси и закрываем браузер
                 await db.release_proxy(pool, worker_id)
+                await worker_browser.close()
             return False
 
         elif meta.status == CatalogParseStatus.PROXY_BLOCKED:
@@ -310,6 +321,9 @@ async def process_task(
                 await worker_browser.close()
             except Exception as e:
                 logger.error(f"[Worker-{worker_id}] Failed to close browser after proxy ban: {e}")
+            finally:
+                # Гарантированно обнуляем current_proxy даже если close() упал
+                worker_browser.current_proxy = None
             return False
 
         elif meta.status == CatalogParseStatus.NOT_DETECTED:
@@ -474,6 +488,9 @@ async def process_task(
                 await worker_browser.close()
             except Exception as close_err:
                 logger.error(f"[Worker-{worker_id}] Failed to close browser after timeout: {close_err}")
+            finally:
+                # Гарантированно обнуляем current_proxy даже если close() упал
+                worker_browser.current_proxy = None
             return "navigation_error"
 
         # Другие критические ошибки - infrastructure issues (parsing errors, etc)
@@ -531,7 +548,7 @@ async def run_worker(worker_id: int, pool, shutdown_event: asyncio.Event):
                         if worker_browser.browser:
                             await worker_browser.close()
 
-                        await db.retry_task(pool, task["id"])
+                        await db.retry_task_no_increment(pool, task["id"])
                         await asyncio.sleep(10)
                         continue
 
