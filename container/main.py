@@ -114,6 +114,9 @@ async def main():
     signal.signal(signal.SIGINT, handle_shutdown_signal)
 
     try:
+        # Восстановление зависших completed задач (после крэшей)
+        await db.reset_all_completed_tasks(db_pool)
+
         # Запуск фоновой задачи cleanup
         cleanup_task = asyncio.create_task(periodic_cleanup(db_pool))
         logger.info("Cleanup task started")

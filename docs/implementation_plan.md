@@ -25,8 +25,8 @@
 **Шаг 2.2** - Создать `container/db.py` с asyncpg функциями
 - create_pool() - создание connection pool (читает DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS из os.getenv)
 - get_pending_task(worker_id) - взятие задачи с блокировкой (FOR UPDATE SKIP LOCKED)
-- complete_task(task_id) - status='completed'
-- reset_completed_to_pending() - completed → pending (через 1 сек)
+- complete_task(task_id) - статус обратно в 'pending' + cooldown 1 сек
+- reset_all_completed_tasks() - возвращает зависшие completed → pending
 - fail_task(task_id, error) - attempts++, status='failed' если >= MAX_TASK_ATTEMPTS (из os.getenv)
 - save_item(item_data) - UPSERT в parsed_items (ON CONFLICT item_id DO UPDATE)
 - get_blocked_items_global() / get_blocked_items_local(group_name)
@@ -153,9 +153,7 @@ aiogram
        - Telegram успешно → add_to_blocklist_global() + add_to_blocklist_local() ВСЕГДА (независимо от режима)
 
   8. Завершение:
-     - complete_task()
-     - await asyncio.sleep(1)
-     - reset_completed_to_pending()
+     - complete_task() (внутри есть короткий cooldown)
 
 **Шаг 5.2** - Добавить вспомогательные функции в worker.py
 - restart_browser(worker_id, new_proxy) - полный перезапуск браузера с новым прокси

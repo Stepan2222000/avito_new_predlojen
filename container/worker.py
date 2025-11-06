@@ -41,9 +41,10 @@ logger = logging.getLogger(__name__)
 class WorkerBrowser:
     """Управление Playwright браузером для одного воркера"""
 
-    def __init__(self, worker_id: int, display: str):
+    def __init__(self, worker_id: int, display: str, pool):
         self.worker_id = worker_id
         self.display = display  # DISPLAY для Xvfb (":1" до ":15")
+        self.pool = pool
         self.playwright: Optional[Playwright] = None
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
@@ -87,8 +88,15 @@ class WorkerBrowser:
 
         logger.info(f"[Worker-{self.worker_id}] Browser started with proxy {server}")
 
-    async def close(self):
-        """Закрытие браузера и освобождение ресурсов"""
+    async def close(self, release_proxy: bool = True):
+        """Закрытие браузера и очистка прокси"""
+        if release_proxy and self.current_proxy and self.pool:
+            try:
+                await db.release_proxy(self.pool, self.worker_id)
+            except Exception as release_err:
+                logger.error(
+                    f"[Worker-{self.worker_id}] Failed to release proxy: {release_err}"
+                )
         if self.page:
             await self.page.close()
             self.page = None
@@ -135,23 +143,19 @@ async def handle_page_state(
             logger.warning(
                 f"[Worker-{worker_id}] Captcha unsolved after {CAPTCHA_MAX_ATTEMPTS} attempts"
             )
-            await db.release_proxy(pool, worker_id)
             await worker_browser.close()
             return state, True
 
     # Прокси блокировка 403/407 (постоянный бан)
     elif state in [PROXY_BLOCK_403_DETECTOR_ID, PROXY_AUTH_DETECTOR_ID]:
         logger.warning(f"[Worker-{worker_id}] Proxy blocked 403/407, banning proxy...")
-        await db.ban_proxy(pool, worker_browser.current_proxy)
-        await db.release_proxy(pool, worker_id)
-        # Перезапуск браузера после бана прокси (safe close)
+        proxy = worker_browser.current_proxy
+        if proxy:
+            await db.ban_proxy(pool, proxy)
         try:
             await worker_browser.close()
         except Exception as e:
             logger.error(f"[Worker-{worker_id}] Failed to close browser after proxy ban: {e}")
-        finally:
-            # Гарантированно обнуляем current_proxy даже если close() упал
-            worker_browser.current_proxy = None
         return state, True
 
     # Каталог - продолжаем нормальный парсинг
@@ -201,16 +205,11 @@ async def process_task(
                     f"[Worker-{worker_id}] Navigation timeout for task #{task['id']} (slow proxy?), "
                     f"releasing proxy and closing browser"
                 )
-                # Освобождаем прокси для смены (как при капче)
-                await db.release_proxy(pool, worker_id)
                 # Закрываем браузер для принудительной смены прокси при retry
                 try:
                     await worker_browser.close()
                 except Exception as close_err:
                     logger.error(f"[Worker-{worker_id}] Failed to close browser after timeout: {close_err}")
-                finally:
-                    # Гарантированно обнуляем current_proxy даже если close() упал
-                    worker_browser.current_proxy = None
             else:
                 logger.error(
                     f"[Worker-{worker_id}] Navigation error for task #{task['id']}: "
@@ -272,7 +271,6 @@ async def process_task(
             html, solved = await resolve_captcha_flow(page, max_attempts=CAPTCHA_MAX_ATTEMPTS)
             if not solved:
                 # Капча все еще не решена - освобождаем прокси и закрываем браузер
-                await db.release_proxy(pool, worker_id)
                 await worker_browser.close()
             return False
 
@@ -282,23 +280,19 @@ async def process_task(
             html, solved = await resolve_captcha_flow(page, max_attempts=CAPTCHA_MAX_ATTEMPTS)
             if not solved:
                 # Капча не решена - освобождаем прокси и закрываем браузер
-                await db.release_proxy(pool, worker_id)
                 await worker_browser.close()
             return False
 
         elif meta.status == CatalogParseStatus.PROXY_BLOCKED:
             # 403/407 - бан прокси и перезапуск браузера
             logger.warning(f"[Worker-{worker_id}] Proxy blocked from parse_catalog")
-            await db.ban_proxy(pool, worker_browser.current_proxy)
-            await db.release_proxy(pool, worker_id)
-            # Перезапуск браузера после бана прокси (safe close)
+            proxy = worker_browser.current_proxy
+            if proxy:
+                await db.ban_proxy(pool, proxy)
             try:
                 await worker_browser.close()
             except Exception as e:
                 logger.error(f"[Worker-{worker_id}] Failed to close browser after proxy ban: {e}")
-            finally:
-                # Гарантированно обнуляем current_proxy даже если close() упал
-                worker_browser.current_proxy = None
             return False
 
         elif meta.status == CatalogParseStatus.NOT_DETECTED:
@@ -437,7 +431,7 @@ async def process_task(
                 # Задача будет retry - объявление попробуем отправить снова
                 return False
 
-        # 8. Завершение задачи (циркулярный режим: completed → pending через 1 сек)
+        # 8. Завершение задачи (циркулярный режим с коротким cooldown)
         await db.complete_task(pool, task["id"])
         logger.info(f"[Worker-{worker_id}] Task completed successfully")
         return True
@@ -456,16 +450,11 @@ async def process_task(
                 f"[Worker-{worker_id}] Navigation/Timeout error for task #{task.get('id', 'N/A')}: "
                 f"{error_type}: {e} - releasing proxy"
             )
-            # Освобождаем прокси для смены (как при капче)
-            await db.release_proxy(pool, worker_id)
             # Закрываем браузер для принудительной смены прокси при retry
             try:
                 await worker_browser.close()
             except Exception as close_err:
                 logger.error(f"[Worker-{worker_id}] Failed to close browser after timeout: {close_err}")
-            finally:
-                # Гарантированно обнуляем current_proxy даже если close() упал
-                worker_browser.current_proxy = None
             return "navigation_error"
 
         # Другие критические ошибки - infrastructure issues (parsing errors, etc)
@@ -488,7 +477,7 @@ async def run_worker(worker_id: int, pool, shutdown_event: asyncio.Event):
     """
 
     display = f":{worker_id}"
-    worker_browser = WorkerBrowser(worker_id, display)
+    worker_browser = WorkerBrowser(worker_id, display, pool)
 
     logger.info(f"[Worker-{worker_id}] Starting with DISPLAY={display}")
 
@@ -562,7 +551,12 @@ async def run_worker(worker_id: int, pool, shutdown_event: asyncio.Event):
                     logger.warning(
                                 f"[Worker-{worker_id}] 5 consecutive failures, restarting browser"
                             )
-                    await worker_browser.close()
+                    try:
+                        await worker_browser.close()
+                    except Exception as close_err:
+                        logger.error(
+                            f"[Worker-{worker_id}] Failed to close browser after consecutive errors: {close_err}"
+                        )
                     consecutive_failures = 0
 
                 # Небольшая пауза между задачами

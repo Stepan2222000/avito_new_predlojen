@@ -114,22 +114,24 @@ async def get_pending_task(pool: asyncpg.Pool, worker_id: int) -> Optional[Dict[
             return dict(row)
 
 
-async def complete_task(pool: asyncpg.Pool, task_id: int) -> None:
+async def complete_task(
+    pool: asyncpg.Pool,
+    task_id: int,
+    cooldown_seconds: float = 1.0,
+) -> None:
     """
-    Завершает задачу и планирует её возврат в pending через 1 секунду.
-    Инкрементирует счетчик успешных парсингов и сбрасывает attempts.
-
-    Использует background task для неблокирующего возврата в pending,
-    что предотвращает потерю задачи при крэше во время sleep.
+    Завершает задачу, сразу возвращая её в pending.
+    Инкрементирует successful_parses и делает короткий cooldown (по умолчанию 1 секунда).
 
     Args:
         pool: Пул подключений
         task_id: ID задачи
+        cooldown_seconds: Пауза перед следующей задачей
     """
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE tasks
-            SET status = 'completed',
+            SET status = 'pending',
                 successful_parses = successful_parses + 1,
                 attempts = 0,
                 locked_at = NULL,
@@ -140,47 +142,29 @@ async def complete_task(pool: asyncpg.Pool, task_id: int) -> None:
         """, task_id)
 
     successful_count = row['successful_parses'] if row else 0
-    logger.info(f"Task {task_id} marked as completed (total successful parses: {successful_count})")
+    logger.info(
+        f"Task {task_id} completed (total successful parses: {successful_count})"
+    )
 
-    # Запускаем background task для возврата в pending через 1 секунду
-    # Это не блокирует worker и безопаснее при крэшах
-    asyncio.create_task(_schedule_reset_to_pending(pool, task_id))
-
-
-async def _schedule_reset_to_pending(pool: asyncpg.Pool, task_id: int) -> None:
-    """
-    Background task helper: ждет 1 секунду и возвращает задачу в pending.
-
-    Args:
-        pool: Пул подключений
-        task_id: ID задачи
-    """
-    try:
-        await asyncio.sleep(1)
-        await reset_completed_to_pending(pool, task_id)
-    except Exception as e:
-        logger.error(f"Failed to reset task {task_id} to pending: {e}")
+    if cooldown_seconds and cooldown_seconds > 0:
+        await asyncio.sleep(cooldown_seconds)
 
 
-async def reset_completed_to_pending(pool: asyncpg.Pool, task_id: int) -> None:
-    """
-    Возвращает completed задачу обратно в pending (циклический режим).
+async def reset_all_completed_tasks(pool: asyncpg.Pool) -> None:
+    """Возвращает все зависшие completed задачи обратно в pending."""
 
-    Args:
-        pool: Пул подключений
-        task_id: ID задачи
-    """
     async with pool.acquire() as conn:
-        await conn.execute("""
+        result = await conn.execute("""
             UPDATE tasks
             SET status = 'pending',
                 locked_at = NULL,
                 locked_by = NULL,
                 updated_at = NOW()
-            WHERE id = $1 AND status = 'completed'
-        """, task_id)
+            WHERE status = 'completed'
+        """)
 
-    logger.info(f"Task {task_id} reset to pending (circular mode)")
+    if result != 'UPDATE 0':
+        logger.info(f"Recovered completed tasks: {result}")
 
 
 async def fail_task(pool: asyncpg.Pool, task_id: int) -> None:
