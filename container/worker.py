@@ -102,31 +102,6 @@ class WorkerBrowser:
         self.current_proxy = None
 
 
-async def restart_browser_with_proxy(
-    worker_browser: WorkerBrowser, pool, worker_id: int
-) -> bool:
-    """
-    Полный перезапуск браузера с новым прокси
-
-    Returns:
-        True - браузер успешно перезапущен с новым прокси
-        False - нет доступных прокси
-    """
-    # Закрытие текущего браузера
-    await worker_browser.close()
-    logger.info(f"[Worker-{worker_id}] Browser closed, getting new proxy...")
-
-    # Получение нового прокси
-    proxy = await db.get_free_proxy(pool, worker_id)
-
-    if not proxy:
-        logger.warning(f"[Worker-{worker_id}] No proxies available for restart")
-        return False
-
-    # Запуск браузера с новым прокси
-    await worker_browser.start(proxy)
-    return True
-
 
 async def handle_page_state(
     state: str,
