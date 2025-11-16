@@ -415,13 +415,13 @@ async def get_free_proxy(pool: asyncpg.Pool, worker_id: int) -> Optional[str]:
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Атомарный захват свободного прокси
+            # Атомарный захват свободного прокси (рандомный выбор)
             row = await conn.fetchrow("""
                 SELECT id, proxy_url
                 FROM proxies
                 WHERE is_banned = FALSE
                   AND locked_at IS NULL
-                ORDER BY id
+                ORDER BY RANDOM()
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             """)
