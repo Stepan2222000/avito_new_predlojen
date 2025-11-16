@@ -18,7 +18,9 @@ CREATE TABLE groups (
     all_russia BOOLEAN NOT NULL,            -- поиск по всей России
     enrich_q BOOLEAN NOT NULL,              -- обогащать поисковый запрос родовым словом
     blocklist_mode TEXT NOT NULL,           -- режим блоклиста: 'global' или 'local'
-    telegram_chat_ids BIGINT[] NOT NULL     -- массив ID чатов для уведомлений
+    telegram_chat_ids BIGINT[] NOT NULL,    -- массив ID чатов для уведомлений
+    min_price BIGINT,                       -- минимальная цена объявления (рубли, NULL = без ограничения)
+    max_price BIGINT                        -- максимальная цена объявления (рубли, NULL = без ограничения)
 );
 
 -- ======================================

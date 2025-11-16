@@ -5,12 +5,14 @@
       "enabled": true,
       "category": "katera_i_yahty",
       "region_slug": "all",
-      "brands": ["bayliner", "sea ray", "chaparral", "regal", "monterey", "four winns", "crownline", "yamaha", "beneteau", "maxum"],
+      "brands": ["bayliner", "sea ray", "chaparral", "regal", "monterey", "four winns", "crownline", "yamaha", "beneteau", "maxum", "Parker", "Silver", "XO", "Delphia", "Buster", "Aquiline", "Aquador", "Doral"],
       "models": {},
       "all_russia": true,
       "enrich_q": false,
       "blocklist_mode": "global",
-      "telegram_chat_ids": [779088495, 6428540024]
+      "telegram_chat_ids": [779088495, 6428540024],
+      "min_price": 500000,
+      "max_price": 1000000000
     }
   ]
 }

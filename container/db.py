@@ -86,7 +86,7 @@ async def get_pending_task(pool: asyncpg.Pool, worker_id: int) -> Optional[Dict[
                     WHERE t2.status = 'pending' AND g2.enabled = TRUE
                 )
                 SELECT t.id, t.group_name, t.url, t.search_query, t.status, t.attempts, t.created_at,
-                       g.telegram_chat_ids, g.blocklist_mode
+                       g.telegram_chat_ids, g.blocklist_mode, g.min_price, g.max_price
                 FROM tasks t
                 JOIN groups g ON t.group_name = g.name
                 JOIN min_success ms ON ms.value IS NOT NULL AND t.successful_parses = ms.value

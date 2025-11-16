@@ -93,6 +93,22 @@ def validate_group(group: Dict[str, Any], group_idx: int) -> None:
     else:
         raise ValueError(f"Group {group_idx}: missing 'telegram_chat_id' or 'telegram_chat_ids'")
 
+    # Валидация min_price и max_price (опциональные поля)
+    min_price = group.get('min_price')
+    max_price = group.get('max_price')
+
+    if min_price is not None and not isinstance(min_price, int):
+        raise ValueError(f"Group {group_idx}: 'min_price' must be integer or null")
+
+    if max_price is not None and not isinstance(max_price, int):
+        raise ValueError(f"Group {group_idx}: 'max_price' must be integer or null")
+
+    if min_price is not None and max_price is not None:
+        if min_price > max_price:
+            raise ValueError(
+                f"Group {group_idx}: 'min_price' ({min_price}) must be <= 'max_price' ({max_price})"
+            )
+
 
 def extract_search_query(url: str) -> str:
     """

@@ -20,7 +20,7 @@ services:
       POSTGRES_PASSWORD: Password123
 
       # Настройки воркеров и лимиты
-      WORKER_COUNT: 3
+      WORKER_COUNT: 2
       MAX_TASK_ATTEMPTS: 20
       TASK_LOCK_TIMEOUT_MINUTES: 10
       PROXY_LOCK_TIMEOUT_MINUTES: 30

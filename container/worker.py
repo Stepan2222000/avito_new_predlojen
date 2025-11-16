@@ -365,6 +365,40 @@ async def process_task(
                 elif "$" in price_str:
                     currency = "$"
 
+                # Фильтр по цене (min_price и max_price из группы)
+                min_price = task.get("min_price")
+                max_price = task.get("max_price")
+
+                if min_price is not None or max_price is not None:
+                    # Извлекаем числовое значение цены (убираем пробелы и нецифровые символы)
+                    if price_value is None:
+                        continue  # Пропускаем если цена не указана
+
+                    try:
+                        # Убираем все кроме цифр
+                        numeric_price = int(''.join(filter(str.isdigit, price_str)))
+
+                        # Проверяем диапазон
+                        if min_price is not None and numeric_price < min_price:
+                            logger.debug(
+                                f"[Worker-{worker_id}] Skipping {listing['item_id']}: "
+                                f"price {numeric_price} < min_price {min_price}"
+                            )
+                            continue
+
+                        if max_price is not None and numeric_price > max_price:
+                            logger.debug(
+                                f"[Worker-{worker_id}] Skipping {listing['item_id']}: "
+                                f"price {numeric_price} > max_price {max_price}"
+                            )
+                            continue
+                    except (ValueError, TypeError):
+                        # Не удалось распарсить цену - пропускаем объявление
+                        logger.warning(
+                            f"[Worker-{worker_id}] Failed to parse price for {listing['item_id']}: {price_str}"
+                        )
+                        continue
+
                 # Создаём обогащённый словарь для Telegram
                 enriched_listing = {**listing, "currency": currency}
 
